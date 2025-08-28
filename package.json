@@ -13,12 +13,9 @@
     "@types/ws": "^8.5.10"
   },
   "scripts": {
-    "start": "node dist/index"
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
   }
-}
-"scripts": {
-  "start": "node server.js"
-},
-"engines": {
-  "node": ">=18"
 }
