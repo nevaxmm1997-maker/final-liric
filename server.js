@@ -1,24 +1,11 @@
-// server.js — wrapper for Render/Fly/Heroku style hosting
-// Binds to 0.0.0.0 and uses process.env.PORT instead of a fixed localhost:8999.
-// Drop this file in the ROOT of your repo and set "start": "node server.js" in package.json.
+// server.js — tolerant wrapper for Render
+// Ưu tiên chạy dist/index (bản build sẵn). Nếu module tự .listen() thì coi như OK.
+// Nếu module export Express app => chúng ta sẽ tạo server và bind 0.0.0.0:PORT.
 
 const http = require('http');
 
-function tryRequire(paths) {
-  for (const p of paths) {
-    try {
-      const mod = require(p);
-      console.log(`[server.js] Loaded module: ${p}`);
-      return mod;
-    } catch (e) {
-      // silently try next
-    }
-  }
-  return null;
-}
-
-// Try common entry modules that export an Express app or a factory returning an app
 const candidates = [
+  './dist/index',     // ƯU TIÊN dist
   './app',
   './src/app',
   './index',
@@ -27,36 +14,83 @@ const candidates = [
   './src/main',
 ];
 
-let mod = tryRequire(candidates);
-if (!mod) {
-  console.error('[server.js] Could not find an app module. Edit "candidates" to point to the file that exports your Express app.');
-  process.exit(1);
+function safeRequire(p) {
+  try {
+    const m = require(p);
+    console.log(`[server.js] Loaded module: ${p}`);
+    return { ok: true, mod: m };
+  } catch (e) {
+    return { ok: false, err: e };
+  }
 }
 
-// Normalize: module could export the app directly, { app }, or a function returning an app (possibly async)
-async function resolveApp(m) {
-  if (m && typeof m.use === 'function') return m;          // express() exported
-  if (m && typeof m.app === 'object' && typeof m.app.use === 'function') return m.app; // { app }
-  if (typeof m === 'function') {
-    const maybe = m();
-    if (maybe && typeof maybe.then === 'function') {
-      return await maybe; // async factory
-    }
-    if (maybe && typeof maybe.use === 'function') return maybe; // sync factory
-  }
-  throw new Error('Module did not export an Express app or app factory.');
+function isExpressApp(m) {
+  return m && typeof m.use === 'function' && typeof m.listen === 'function';
+}
+
+function hasAppProp(m) {
+  return m && typeof m.app === 'object' && typeof m.app.use === 'function';
 }
 
 (async () => {
-  try {
-    const app = await resolveApp(mod);
-    const HOST = process.env.HOST || '0.0.0.0';
-    const PORT = Number(process.env.PORT) || 8999;
-    http.createServer(app).listen(PORT, HOST, () => {
-      console.log(`[server.js] Listening on http://${HOST}:${PORT}`);
+  const HOST = process.env.HOST || '0.0.0.0';
+  const PORT = Number(process.env.PORT) || 8999;
+
+  for (const path of candidates) {
+    const res = safeRequire(path);
+    if (!res.ok) continue;
+
+    let mod = res.mod;
+
+    // TH1: module export trực tiếp express() app
+    if (isExpressApp(mod)) {
+      const app = mod;
+      http.createServer(app).listen(PORT, HOST, () => {
+        console.log(`[server.js] (app) Listening on http://${HOST}:${PORT}`);
+      });
+      return;
+    }
+
+    // TH2: module export { app }
+    if (hasAppProp(mod)) {
+      const app = mod.app;
+      http.createServer(app).listen(PORT, HOST, () => {
+        console.log(`[server.js] ({app}) Listening on http://${HOST}:${PORT}`);
+      });
+      return;
+    }
+
+    // TH3: module export function trả về app (sync/async)
+    if (typeof mod === 'function') {
+      try {
+        const maybe = mod();
+        if (maybe && typeof maybe.then === 'function') {
+          mod = await maybe;
+        } else {
+          mod = maybe;
+        }
+        if (isExpressApp(mod)) {
+          http.createServer(mod).listen(PORT, HOST, () => {
+            console.log(`[server.js] (factory) Listening on http://${HOST}:${PORT}`);
+          });
+          return;
+        }
+      } catch (e) {
+        // bỏ qua, thử path tiếp theo
+      }
+    }
+
+    // TH4: Module tự .listen() bên trong (không export app) — thường là dist/index
+    // Nếu require() không ném lỗi và process chưa thoát thì coi như app đã tự start.
+    console.log(`[server.js] Module "${path}" did not export an app; assuming it started its own server.`);
+    // Giữ process sống bằng 1 server no-op nếu cần (phòng khi module chạy detached)
+    const noop = http.createServer((_, res) => res.end('OK'));
+    noop.listen(0, '127.0.0.1', () => {
+      console.log('[server.js] Keeping process alive (noop server).');
     });
-  } catch (err) {
-    console.error('[server.js] Failed to resolve/start app:', err);
-    process.exit(1);
+    return;
   }
+
+  console.error('[server.js] Could not find any suitable module (tried dist/index, app, index, ...).');
+  process.exit(1);
 })();
